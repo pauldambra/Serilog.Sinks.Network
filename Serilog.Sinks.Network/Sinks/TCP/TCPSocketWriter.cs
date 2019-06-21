@@ -17,10 +17,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
-using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.Security.Authentication;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -47,6 +45,8 @@ namespace Serilog.Sinks.Network.Sinks.TCP
     /// </remarks>
     public class TcpSocketWriter : IDisposable
     {
+        private volatile bool _isDisposed;
+
         private readonly FixedSizeQueue<string> _eventQueue;
         private readonly ExponentialBackoffTcpReconnectionPolicy _reconnectPolicy = new ExponentialBackoffTcpReconnectionPolicy();
         private readonly CancellationTokenSource _tokenSource; // Must be private or Dispose will not function properly.
@@ -200,17 +200,37 @@ namespace Serilog.Sinks.Network.Sinks.TCP
 
                     _disposed.SetResult(true);
                 }
-            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            }, _tokenSource.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             threadReady.Task.Wait(TimeSpan.FromSeconds(5));
         }
 
         public void Dispose()
         {
+            if (_isDisposed)
+            {
+                return;
+            }
+            _isDisposed = true;
+
             // The following operations are idempotent. Issue a cancellation to tell the
             // writer thread to stop the queue from accepting entries and write what it has
             // before cleaning up, then wait until that cleanup is finished.
             _tokenSource.Cancel();
-            Task.Run(async () => await _disposed.Task).Wait();
+            try
+            {
+                Task.Run(() => _disposed.Task).Wait();
+            }
+            finally
+            {
+                _tokenSource.Dispose();
+            }
+
+            GC.SuppressFinalize(this);
+        }
+
+        ~TcpSocketWriter()
+        {
+            Dispose();
         }
 
         /// <summary>
